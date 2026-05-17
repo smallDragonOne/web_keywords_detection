@@ -3,7 +3,6 @@ const DEFAULT_SETTINGS = {
   enabled: false,
   maxItems: 200,
   refreshMinutes: 2,
-  panelAlertEnabled: true,
   monitoredTabIds: []
 };
 
@@ -11,13 +10,17 @@ const STORAGE_KEYS = {
   settings: "settings",
   matches: "matches",
   dedupSet: "dedupSet",
-  alertState: "alertState"
+  alertState: "alertState",
+  blockedTabs: "blockedTabs",
+  tabRefreshState: "tabRefreshState"
 };
 
 let cacheSettings = { ...DEFAULT_SETTINGS };
 let cacheMatches = [];
 let cacheDedupSet = {};
 let alertState = { unreadCount: 0, latestAt: "" };
+let blockedTabs = {};
+let tabRefreshState = {};
 
 init().catch((error) => {
   console.error("Init failed:", error);
@@ -28,7 +31,9 @@ async function init() {
     STORAGE_KEYS.settings,
     STORAGE_KEYS.matches,
     STORAGE_KEYS.dedupSet,
-    STORAGE_KEYS.alertState
+    STORAGE_KEYS.alertState,
+    STORAGE_KEYS.blockedTabs,
+    STORAGE_KEYS.tabRefreshState
   ]);
 
   cacheSettings = { ...DEFAULT_SETTINGS, ...(stored[STORAGE_KEYS.settings] || {}) };
@@ -38,10 +43,13 @@ async function init() {
   alertState = isObject(stored[STORAGE_KEYS.alertState])
     ? { unreadCount: 0, latestAt: "", ...stored[STORAGE_KEYS.alertState] }
     : { unreadCount: 0, latestAt: "" };
+  blockedTabs = isObject(stored[STORAGE_KEYS.blockedTabs]) ? stored[STORAGE_KEYS.blockedTabs] : {};
+  tabRefreshState = isObject(stored[STORAGE_KEYS.tabRefreshState]) ? stored[STORAGE_KEYS.tabRefreshState] : {};
 
   registerListeners();
   await syncMonitoredTabs();
   await ensureRefreshAlarm();
+  await syncActionBadge();
 }
 
 function registerListeners() {
@@ -53,17 +61,23 @@ function registerListeners() {
   chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (!cacheSettings.enabled || changeInfo.status !== "complete") return;
     if (!isMonitoredTab(tabId)) return;
+    await delay(1000);
     await scanTab(tabId, tab?.url || "");
   });
 
   chrome.tabs.onRemoved.addListener(async (tabId) => {
     if (!isMonitoredTab(tabId)) return;
     cacheSettings.monitoredTabIds = cacheSettings.monitoredTabIds.filter((id) => id !== tabId);
+    delete blockedTabs[String(tabId)];
+    delete tabRefreshState[String(tabId)];
     await chrome.storage.local.set({ [STORAGE_KEYS.settings]: cacheSettings });
+    await chrome.storage.local.set({ [STORAGE_KEYS.blockedTabs]: blockedTabs });
+    await chrome.storage.local.set({ [STORAGE_KEYS.tabRefreshState]: tabRefreshState });
   });
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "getState") {
+      clearActionBadge().catch(() => null);
       getStatePayload().then((payload) => sendResponse(payload));
       return true;
     }
@@ -126,7 +140,10 @@ function registerListeners() {
       alertState.unreadCount = 0;
       chrome.storage.local
         .set({ [STORAGE_KEYS.alertState]: alertState })
-        .then(() => sendResponse({ ok: true, alertState }))
+        .then(async () => {
+          await syncActionBadge();
+          sendResponse({ ok: true, alertState });
+        })
         .catch((error) => sendResponse({ ok: false, error: String(error) }));
       return true;
     }
@@ -212,7 +229,6 @@ async function updateSettings(nextSettings) {
     maxItems: normalizeNumber(nextSettings.maxItems, cacheSettings.maxItems, 10),
     refreshMinutes: normalizeNumber(nextSettings.refreshMinutes, cacheSettings.refreshMinutes, 1),
     enabled: Boolean(nextSettings.enabled ?? cacheSettings.enabled),
-    panelAlertEnabled: Boolean(nextSettings.panelAlertEnabled ?? cacheSettings.panelAlertEnabled),
     monitoredTabIds: normalizeTabIds(nextSettings.monitoredTabIds ?? cacheSettings.monitoredTabIds)
   };
 
@@ -240,7 +256,10 @@ async function ensureRefreshAlarm() {
 async function refreshMonitoredTabs() {
   await syncMonitoredTabs();
   for (const tabId of cacheSettings.monitoredTabIds) {
+    if (isBlockedTab(tabId)) continue;
     await chrome.tabs.reload(tabId).catch(() => null);
+    await delay(1500);
+    await scanTab(tabId);
   }
 }
 
@@ -250,13 +269,30 @@ async function scanTab(tabId, knownUrl) {
   if (!isMonitoredTab(tabId) || !isSupportedUrl(targetUrl)) return;
 
   const extracted = await chrome.scripting
-    .executeScript({ target: { tabId }, func: extractPageContent })
+    .executeScript({ target: { tabId }, func: extractPageContent, args: [parseCsv(cacheSettings.keywords)] })
     .then((result) => result?.[0]?.result || null)
     .catch(() => null);
 
   if (!extracted?.text) return;
+  await markTabRefreshed(tabId);
 
-  const matched = matchByKeywords(extracted.text, cacheSettings.keywords);
+  if (isBlockedPage(extracted.title, extracted.text)) {
+    blockedTabs[String(tabId)] = {
+      url: targetUrl,
+      title: extracted.title || tab?.title || "(no title)",
+      detectedAt: new Date().toISOString()
+    };
+    await persistState();
+    return;
+  }
+
+  if (blockedTabs[String(tabId)]) {
+    delete blockedTabs[String(tabId)];
+  }
+
+  const matched = Array.isArray(extracted.records) && extracted.records.length
+    ? { hasMatch: true, records: extracted.records }
+    : matchByKeywords(extracted.text, cacheSettings.keywords);
   if (!matched.hasMatch) return;
 
   const records = Array.isArray(matched.records) ? matched.records : [];
@@ -275,8 +311,8 @@ async function scanTab(tabId, knownUrl) {
       matchText: record.keyword,
       snippetIndex: record.index,
       snippet: record.snippet,
-      hasDetailPage: extracted.hasDetailPage,
-      detailLinks: extracted.detailLinks || [],
+      hasDetailPage: Array.isArray(record.detailLinks) && record.detailLinks.length > 0,
+      detailLinks: record.detailLinks || [],
       pageTime: extracted.pageTime,
       capturedAt: new Date().toISOString()
     };
@@ -296,9 +332,9 @@ async function scanTab(tabId, knownUrl) {
 }
 
 function bumpAlert(increase = 1) {
-  if (!cacheSettings.panelAlertEnabled) return;
   alertState.unreadCount = (alertState.unreadCount || 0) + Math.max(1, Number(increase) || 1);
   alertState.latestAt = new Date().toISOString();
+  syncActionBadge().catch(() => null);
 }
 
 async function clearMatchesAndDedup() {
@@ -306,13 +342,15 @@ async function clearMatchesAndDedup() {
   cacheDedupSet = {};
   alertState.unreadCount = 0;
   await persistState();
+  await syncActionBadge();
 }
 
 async function persistState() {
   await chrome.storage.local.set({
     [STORAGE_KEYS.matches]: cacheMatches,
     [STORAGE_KEYS.dedupSet]: cacheDedupSet,
-    [STORAGE_KEYS.alertState]: alertState
+    [STORAGE_KEYS.alertState]: alertState,
+    [STORAGE_KEYS.blockedTabs]: blockedTabs
   });
 }
 
@@ -330,13 +368,27 @@ async function getMonitoredTabsStatus() {
   for (const tabId of cacheSettings.monitoredTabIds) {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     if (!tab?.id || !isSupportedUrl(tab.url || "")) continue;
-    result.push({ id: tab.id, title: tab.title || "(no title)", url: tab.url || "" });
+    result.push({
+      id: tab.id,
+      title: tab.title || "(no title)",
+      url: tab.url || "",
+      lastRefreshAt: tabRefreshState[String(tab.id)] || ""
+    });
   }
   return result;
 }
 
+async function markTabRefreshed(tabId) {
+  tabRefreshState[String(tabId)] = new Date().toISOString();
+  await chrome.storage.local.set({ [STORAGE_KEYS.tabRefreshState]: tabRefreshState });
+}
+
 function isMonitoredTab(tabId) {
   return cacheSettings.monitoredTabIds.includes(Number(tabId));
+}
+
+function isBlockedTab(tabId) {
+  return Boolean(blockedTabs[String(tabId)]);
 }
 
 function normalizeTabIds(value) {
@@ -473,6 +525,26 @@ function normalizeNumber(value, fallback, minValue) {
   return Math.max(minValue, Math.round(num));
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isBlockedPage(title, text) {
+  const content = `${title || ""}\n${text || ""}`.toLowerCase();
+  return /404|not found|页面不存在|访问异常|安全验证|验证码|security check|forbidden|robot|robots|verify/.test(content);
+}
+
+async function syncActionBadge() {
+  const count = Number(alertState.unreadCount || 0);
+  await chrome.action.setBadgeBackgroundColor({ color: "#9f111b" });
+  await chrome.action.setBadgeTextColor({ color: "#ffffff" }).catch(() => null);
+  await chrome.action.setBadgeText({ text: count > 0 ? (count > 99 ? "99+" : String(count)) : "" });
+}
+
+async function clearActionBadge() {
+  await chrome.action.setBadgeText({ text: "" });
+}
+
 function pruneDedupSet() {
   const entries = Object.entries(cacheDedupSet)
     .sort((a, b) => new Date(b[1]).getTime() - new Date(a[1]).getTime())
@@ -530,35 +602,125 @@ function csvEscape(value) {
   return `"${s.replace(/"/g, '""')}"`;
 }
 
-function extractPageContent() {
+function extractPageContent(keywords = []) {
   const bodyText = (document.body?.innerText || "").slice(0, 120000);
-  const links = Array.from(document.querySelectorAll("a[href]"));
-  const detailLinks = links
-    .map((link) => {
-      const text = (link.textContent || "").trim();
-      const href = link.getAttribute("href") || "";
-      const absolute = resolveAbsoluteUrl(href);
-      const isDetail =
-        /详情|detail|read more|更多|查看/i.test(text) ||
-        /detail|article|post|news|doc|content|thread/i.test(href);
-      if (!isDetail || !absolute) return null;
-      return { text: text || "详情", url: absolute };
-    })
-    .filter(Boolean);
-
-  const hasDetailPage = detailLinks.length > 0 || links.some((link) => {
-    const text = (link.textContent || "").trim();
-    const href = link.getAttribute("href") || "";
-    return /详情|detail|read more|更多|查看/i.test(text) || /detail|article|post|news/i.test(href);
-  });
+  const records = collectNearbyMatchRecords(keywords);
+  const hasDetailPage = records.some((record) => record.detailLinks?.length);
   const pageTime = detectTimeFromPage(bodyText);
   return {
     title: document.title,
     text: bodyText,
     hasDetailPage,
-    detailLinks: detailLinks.slice(0, 8),
+    records,
     pageTime
   };
+
+  function collectNearbyMatchRecords(rawKeywords) {
+    const validKeywords = Array.isArray(rawKeywords)
+      ? rawKeywords.map((kw) => String(kw || "").trim()).filter(Boolean)
+      : [];
+    if (!validKeywords.length || !document.body) return [];
+
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        const text = (node.nodeValue || "").trim();
+        if (!text || text.length < 2) return NodeFilter.FILTER_REJECT;
+        const parent = node.parentElement;
+        if (!parent || ["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA", "INPUT"].includes(parent.tagName)) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+
+    const results = [];
+    const seen = new Set();
+    const counters = {};
+    let node = walker.nextNode();
+
+    while (node && results.length < 80) {
+      const text = node.nodeValue || "";
+      const normalizedText = normalizeForLocalMatch(text);
+      for (const keyword of validKeywords) {
+        const normalizedKeyword = normalizeForLocalMatch(keyword);
+        if (!normalizedKeyword || !normalizedText.includes(normalizedKeyword)) continue;
+
+        const element = node.parentElement;
+        if (!element) continue;
+        const contextElements = getNearbyElements(element, 3);
+        const snippet = buildNearbySnippet(contextElements);
+        if (!snippet) continue;
+
+        const key = `${keyword}|${snippet}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        counters[keyword] = (counters[keyword] || 0) + 1;
+
+        results.push({
+          keyword,
+          snippet,
+          index: counters[keyword],
+          detailLinks: findNearestDetailLinks(element, contextElements)
+        });
+      }
+      node = walker.nextNode();
+    }
+
+    return results;
+  }
+
+  function normalizeForLocalMatch(text) {
+    return String(text || "")
+      .toLowerCase()
+      .replace(/["'“”‘’]/g, "")
+      .replace(/\s+/g, "");
+  }
+
+  function getNearbyElements(element, range) {
+    const parent = element.parentElement;
+    if (!parent) return [element];
+
+    const siblings = Array.from(parent.children);
+    const index = siblings.indexOf(element);
+    if (index < 0) return [element];
+
+    const start = Math.max(0, index - range);
+    const end = Math.min(siblings.length - 1, index + range);
+    return siblings.slice(start, end + 1);
+  }
+
+  function buildNearbySnippet(elements) {
+    return elements
+      .map((el) => (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim())
+      .filter(Boolean)
+      .join(" ")
+      .slice(0, 300)
+      .trim();
+  }
+
+  function findNearestDetailLinks(element, contextElements) {
+    const candidates = [];
+    const ownLink = element.closest("a[href]");
+    if (ownLink) candidates.push(ownLink);
+
+    for (const el of contextElements) {
+      if (el.matches?.("a[href]")) candidates.push(el);
+      candidates.push(...Array.from(el.querySelectorAll("a[href]")));
+    }
+
+    const unique = [];
+    const seen = new Set();
+    for (const link of candidates) {
+      const href = link.getAttribute("href") || "";
+      const url = resolveAbsoluteUrl(href);
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      unique.push({ text: (link.textContent || "详情").replace(/\s+/g, " ").trim() || "详情", url });
+      if (unique.length >= 3) break;
+    }
+
+    return unique;
+  }
 
   function detectTimeFromPage(innerBodyText) {
     const timeElement = document.querySelector("time");

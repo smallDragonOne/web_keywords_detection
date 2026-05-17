@@ -4,7 +4,6 @@ const el = {
   keywords: document.getElementById("keywords"),
   maxItems: document.getElementById("maxItems"),
   refreshMinutes: document.getElementById("refreshMinutes"),
-  panelAlertEnabled: document.getElementById("panelAlertEnabled"),
   startBtn: document.getElementById("startBtn"),
   stopBtn: document.getElementById("stopBtn"),
   saveBtn: document.getElementById("saveBtn"),
@@ -116,7 +115,6 @@ function applySettings(settings) {
   el.keywords.value = settings.keywords || "";
   el.maxItems.value = settings.maxItems || 200;
   el.refreshMinutes.value = settings.refreshMinutes || 2;
-  el.panelAlertEnabled.checked = Boolean(settings.panelAlertEnabled);
 }
 
 async function onToggleCurrentTab() {
@@ -154,7 +152,6 @@ async function onSaveSettings() {
     keywords: el.keywords.value,
     maxItems: Number(el.maxItems.value || 200),
     refreshMinutes: Number(el.refreshMinutes.value || 2),
-    panelAlertEnabled: el.panelAlertEnabled.checked,
     enabled: currentState.settings.enabled,
     monitoredTabIds: currentState.monitoredTabs.map((t) => t.id)
   };
@@ -205,7 +202,6 @@ function renderAlert() {
     `状态:${s.enabled ? "监听中" : "未监听"}`,
     `当前页:${currentState.currentTab ? (currentState.currentTabMonitored ? "已监听" : "未监听") : "不可用"}`,
     `监听标签:${(currentState.monitoredTabs || []).length}`,
-    `新命中提醒:${s.panelAlertEnabled ? "开启" : "关闭"}`,
     `未读:${a.unreadCount || 0}`,
     `最近:${fmt(a.latestAt) || "无"}`
   ].join(" | ");
@@ -249,7 +245,8 @@ function renderMonitoredTabs() {
   for (const tab of currentState.monitoredTabs) {
     const li = document.createElement("li");
     li.className = "match-item";
-    li.innerHTML = `<strong>${escapeHtml(tab.title)}</strong><br><a href="${escapeAttr(tab.url)}" target="_blank" rel="noreferrer">${escapeHtml(tab.url)}</a>`;
+    const refreshText = tab.lastRefreshAt ? `最近刷新:${escapeHtml(fmt(tab.lastRefreshAt))}` : "最近刷新:无";
+    li.innerHTML = `<strong>${escapeHtml(tab.title)}</strong><br><a href="${escapeAttr(tab.url)}" target="_blank" rel="noreferrer">${escapeHtml(tab.url)}</a><div class="meta">${refreshText}</div>`;
 
     const row = document.createElement("div");
     row.className = "actions";

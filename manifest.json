@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Page Watcher Summary",
+  "version": "1.0.0",
+  "description": "Realtime capture of open page content with domain and keyword filtering.",
+  "permissions": [
+    "tabs",
+    "storage",
+    "scripting",
+    "alarms",
+    "downloads"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Page Watcher Summary",
+    "default_popup": "popup.html"
+  }
+}

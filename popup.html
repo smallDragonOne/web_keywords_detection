@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Page Watcher Summary</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <h1>标签页监听</h1>
+        <nav class="tabs" aria-label="主分类">
+          <button class="tab-btn active" data-tab="tab-settings" id="tabBtnSettings">管理设置</button>
+          <button class="tab-btn" data-tab="tab-monitored" id="tabBtnMonitored">监听标签</button>
+          <button class="tab-btn" data-tab="tab-matches" id="tabBtnMatches">命中列表 <span id="matchBadge" class="badge hidden">0</span></button>
+        </nav>
+      </header>
+
+      <section class="panel tab-panel active" id="tab-settings">
+        <div class="actions">
+          <button id="toggleCurrentTabBtn">加入监听当前标签页</button>
+          <button id="scanNowBtn" class="secondary">立即扫描当前页</button>
+        </div>
+
+        <label>
+          <span>关键词（分号分隔）</span>
+          <textarea id="keywords" rows="4" placeholder="融资;发布;update"></textarea>
+        </label>
+
+        <div class="inline-grid">
+          <label>
+            <span>自动刷新间隔(分钟)</span>
+            <input id="refreshMinutes" type="number" min="1" />
+          </label>
+          <label>
+            <span>最大保留条数</span>
+            <input id="maxItems" type="number" min="10" />
+          </label>
+        </div>
+
+        <label>
+          <span>面板提醒</span>
+          <input id="panelAlertEnabled" type="checkbox" checked />
+        </label>
+
+        <div class="actions">
+          <button id="startBtn">开始监听</button>
+          <button id="stopBtn" class="secondary">停止监听</button>
+          <button id="saveBtn">保存设置</button>
+          <button id="markReadBtn" class="secondary">提醒清零</button>
+        </div>
+
+        <p id="alertInfo" class="status"></p>
+        <p id="status" class="status"></p>
+      </section>
+
+      <section class="panel tab-panel" id="tab-monitored">
+        <h2>监听中的标签页</h2>
+        <ul id="monitoredList" class="match-list"></ul>
+      </section>
+
+      <section class="panel tab-panel" id="tab-matches">
+        <h2>命中摘要</h2>
+        <div class="actions">
+          <button id="clearBtn" class="secondary">清空列表</button>
+          <button id="exportJsonBtn" class="secondary">导出 JSON</button>
+          <button id="exportCsvBtn" class="secondary">导出 Excel(CSV)</button>
+        </div>
+        <ul id="matchList" class="match-list"></ul>
+      </section>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

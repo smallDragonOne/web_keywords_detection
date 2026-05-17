@@ -51,3 +51,5 @@
 - `popup.html` - 面板结构
 - `popup.css` - 面板样式
 - `popup.js` - 面板交互与列表渲染
+
+## 友链 https://linux.do/
